@@ -10,6 +10,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pandas>=2.0"]
+# numba JIT-compiles the HMM forward/backward loops (~50-100x speedup on n=20000).
+# Install with: pip install parity-regime-lab[fast]
+fast = ["numba>=0.57"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
