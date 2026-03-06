@@ -24,34 +24,34 @@ def gen_mobius_seam_signal(
 
     Returns (y, s, x, theta).
     """
-    theta = np.zeros(n)
-    theta[0] = phase0
-
-    s = np.ones(n, dtype=int)
-
     TWO_PI = 2 * np.pi
 
-    for t in range(1, n):
-        theta_prev = theta[t - 1]
-        theta[t] = theta_prev + omega + rng.normal(0.0, noise_theta)
+    # --- Phase trajectory ---
+    # For the deterministic case (noise_theta=0) the phase is a simple
+    # arithmetic progression — fully vectorized.  For stochastic phase
+    # we still need a sequential loop because each step depends on the previous.
+    if noise_theta == 0.0:
+        theta = phase0 + np.arange(n, dtype=float) * omega
+    else:
+        theta = np.empty(n, dtype=float)
+        theta[0] = phase0
+        for t in range(1, n):
+            theta[t] = theta[t - 1] + omega + rng.normal(0.0, noise_theta)
 
-        prev_mod = theta_prev % TWO_PI
-        curr_mod = theta[t] % TWO_PI
+    # --- Vectorized seam-crossing count ---
+    # For each step t->t+1, shift so the seam is at 0 and count how many times
+    # the linear path crosses a multiple of 2π.  Taking min/max handles both
+    # positive and negative omega without a conditional swap.
+    lo = np.minimum(theta[:-1], theta[1:]) - seam   # (n-1,)
+    hi = np.maximum(theta[:-1], theta[1:]) - seam   # (n-1,)
+    crossings = (np.floor(hi / TWO_PI) - np.floor(lo / TWO_PI)).astype(int)
 
-        # Count how many times the trajectory crosses the seam in this step.
-        # We integrate the crossing count exactly: the number of times a
-        # linearly-interpolated path from theta_prev to theta[t] crosses
-        # (seam + 2pi*k) for integer k.  Each crossing flips orientation once.
-        #
-        # Equivalently: shift so the seam is at 0, count full half-turns
-        # traversed (i.e. crossings of 0 mod 2pi in the shifted frame).
-        lo = theta_prev - seam
-        hi = theta[t] - seam
-        if lo > hi:
-            lo, hi = hi, lo
-        n_crossings = int(np.floor(hi / TWO_PI)) - int(np.floor(lo / TWO_PI))
-
-        s[t] = s[t - 1] * ((-1) ** n_crossings)
+    # --- Vectorized parity accumulation ---
+    # s[t] = s[0] × ∏_{i=1}^{t} (-1)^crossings[i]
+    #       = (-1)^(cumulative crossing count up to t)
+    cumcross = np.cumsum(crossings)
+    s = np.ones(n, dtype=int)
+    s[1:] = np.where(cumcross % 2 == 0, 1, -1)
 
     x = amp * np.sin(theta)
     y = s * x + rng.normal(0.0, tau, size=n)

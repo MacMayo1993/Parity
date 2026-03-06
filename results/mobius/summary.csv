@@ -1,0 +1,2 @@
+omega,n,tau,amp,AR1_a_hat,AR1_resid_std,FFT_peak_over_total,HMM_q_hat,HMM_tau_hat,Parity_acc,log_evidence
+0.03,20000,0.6,1.0,0.582581,0.751162,0.009774,0.005046,0.592452,0.98015,-18310.622

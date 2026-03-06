@@ -19,31 +19,64 @@ def run_main_experiment(
     amp: float,
     seed: int,
     qs: list[float] | None = None,
+    n_seeds: int = 1,
 ) -> str:
+    """
+    Run the standard parity sweep experiment.
+
+    Each (q, seed_index) pair gets its own independent RNG derived from
+    (seed, q_index, seed_index), so results are fully reproducible and
+    independent across both q values and seeds.
+
+    When n_seeds > 1, each metric is reported as mean ± std across seeds.
+    """
     os.makedirs(outdir, exist_ok=True)
-    rng = np.random.default_rng(seed)
     if qs is None:
         qs = [0.0, 0.002, 0.01, 0.03]
 
     rows = []
-    for q in qs:
-        y, s, x = gen_parity_switched_signal(n=n, q=q, amp=amp, freq=freq, tau=tau, rng=rng)
-        a_hat, e = ar1_fit(y)
-        resid_std = float(np.std(e))
-        leak = fft_peak_over_total(y)
-        q_hat, tau2_hat, s_hat, logZ = hmm_em_known_x(y=y, x=x, n_iter=25, q_init=max(q, 0.005))
-        acc = parity_accuracy(s, s_hat)
+    for qi, q in enumerate(qs):
+        ar1_resids, fft_leaks, q_hats, tau_hats, accs, logZs = [], [], [], [], [], []
 
-        rows.append({
-            "true_q": q,
-            "AR1_a_hat": a_hat,
-            "AR1_resid_std": resid_std,
-            "FFT_peak_over_total": leak,
-            "HMM_q_hat": q_hat,
-            "HMM_tau_hat": float(np.sqrt(tau2_hat)),
-            "Parity_acc": acc,
-            "log_evidence": logZ,
-        })
+        for si in range(n_seeds):
+            # Independent RNG per (q_index, seed_index) — no shared state across q values
+            rng = np.random.default_rng([seed, qi, si])
+            y, s, x = gen_parity_switched_signal(
+                n=n, q=q, amp=amp, freq=freq, tau=tau, rng=rng
+            )
+            a_hat, e = ar1_fit(y)
+            ar1_resids.append(float(np.std(e)))
+            fft_leaks.append(fft_peak_over_total(y))
+
+            q_hat, tau2_hat, s_hat, logZ = hmm_em_known_x(
+                y=y, x=x, n_iter=25, q_init=max(q, 0.005)
+            )
+            q_hats.append(q_hat)
+            tau_hats.append(float(np.sqrt(tau2_hat)))
+            accs.append(parity_accuracy(s, s_hat))
+            logZs.append(logZ)
+
+        def _s(v: list[float]) -> dict:
+            a = np.array(v)
+            if n_seeds == 1:
+                return {"mean": float(a[0]), "std": 0.0}
+            return {"mean": float(a.mean()), "std": float(a.std())}
+
+        row = {"true_q": q}
+        for name, vals in [
+            ("AR1_resid_std", ar1_resids),
+            ("FFT_peak_over_total", fft_leaks),
+            ("HMM_q_hat", q_hats),
+            ("HMM_tau_hat", tau_hats),
+            ("Parity_acc", accs),
+            ("log_evidence", logZs),
+        ]:
+            s_ = _s(vals)
+            row[name] = s_["mean"]
+            if n_seeds > 1:
+                row[f"{name}_std"] = s_["std"]
+
+        rows.append(row)
 
     csv_path = os.path.join(outdir, "summary.csv")
     with open(csv_path, "w", newline="") as f:
@@ -52,9 +85,18 @@ def run_main_experiment(
         w.writerows(rows)
 
     qs_arr = np.array([r["true_q"] for r in rows])
+    ar1_vals = np.array([r["AR1_resid_std"] for r in rows])
+    fft_vals = np.array([r["FFT_peak_over_total"] for r in rows])
+    acc_vals = np.array([r["Parity_acc"] for r in rows])
 
+    # Optional std arrays (zero when n_seeds == 1)
+    ar1_std = np.array([r.get("AR1_resid_std_std", 0.0) for r in rows])
+    fft_std = np.array([r.get("FFT_peak_over_total_std", 0.0) for r in rows])
+    acc_std = np.array([r.get("Parity_acc_std", 0.0) for r in rows])
+
+    # --- Individual metric plots ---
     plt.figure()
-    plt.plot(qs_arr, [r["AR1_resid_std"] for r in rows], marker="o")
+    plt.errorbar(qs_arr, ar1_vals, yerr=ar1_std if n_seeds > 1 else None, marker="o", capsize=4)
     plt.xlabel("Flip probability q (true)")
     plt.ylabel("AR(1) residual std")
     plt.title("Local fit degrades as parity flips increase")
@@ -62,7 +104,7 @@ def run_main_experiment(
     plt.close()
 
     plt.figure()
-    plt.plot(qs_arr, [r["FFT_peak_over_total"] for r in rows], marker="o")
+    plt.errorbar(qs_arr, fft_vals, yerr=fft_std if n_seeds > 1 else None, marker="o", capsize=4)
     plt.xlabel("Flip probability q (true)")
     plt.ylabel("FFT peak/total magnitude")
     plt.title("Spectral concentration drops with parity flips (leakage increases)")
@@ -70,7 +112,7 @@ def run_main_experiment(
     plt.close()
 
     plt.figure()
-    plt.plot(qs_arr, [r["Parity_acc"] for r in rows], marker="o")
+    plt.errorbar(qs_arr, acc_vals, yerr=acc_std if n_seeds > 1 else None, marker="o", capsize=4)
     plt.xlabel("Flip probability q (true)")
     plt.ylabel("Parity reconstruction accuracy")
     plt.ylim(0, 1.02)
@@ -78,13 +120,44 @@ def run_main_experiment(
     plt.savefig(os.path.join(outdir, "plot_parity_accuracy.png"), dpi=160, bbox_inches="tight")
     plt.close()
 
-    # MI curvature plot
+    # --- Comparison plot: blind vs parity-aware on one figure ---
+    fig, axes = plt.subplots(1, 3, figsize=(13, 4))
+
+    ax = axes[0]
+    ax.errorbar(qs_arr, ar1_vals, yerr=ar1_std if n_seeds > 1 else None,
+                marker="o", color="tab:orange", capsize=4, label="AR(1) resid std")
+    ax.set_xlabel("True flip rate q")
+    ax.set_ylabel("AR(1) residual std")
+    ax.set_title("Blind: AR(1)\n(degrades, no diagnosis)")
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1]
+    ax.errorbar(qs_arr, fft_vals, yerr=fft_std if n_seeds > 1 else None,
+                marker="o", color="tab:red", capsize=4, label="FFT peak/total")
+    ax.set_xlabel("True flip rate q")
+    ax.set_ylabel("FFT peak / total")
+    ax.set_title("Blind: FFT\n(smears, no diagnosis)")
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[2]
+    ax.errorbar(qs_arr, acc_vals, yerr=acc_std if n_seeds > 1 else None,
+                marker="o", color="tab:green", capsize=4, label="Parity accuracy")
+    ax.set_xlabel("True flip rate q")
+    ax.set_ylabel("Parity accuracy")
+    ax.set_ylim(0, 1.02)
+    ax.set_title("Parity-aware: HMM\n(tracks orientation, stays accurate)")
+    ax.grid(True, alpha=0.3)
+
+    fig.suptitle("Blind diagnostics vs Parity-aware HMM", fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    fig.savefig(os.path.join(outdir, "plot_comparison.png"), dpi=160, bbox_inches="tight")
+    plt.close(fig)
+
+    # --- MI curvature plot ---
+    rng_mi = np.random.default_rng([seed, 9999])
     amps = np.array([0.02, 0.05, 0.08, 0.10, 0.12, 0.15, 0.20])
-    mi_est = []
-    mi_apx = []
-    for a in amps:
-        mi_est.append(estimate_mi_parity_bits(a=a, tau=1.0, rng=rng, n=250_000))
-        mi_apx.append(mi_small_snr_approx_bits(a=a, tau=1.0))
+    mi_est = [estimate_mi_parity_bits(a=a, tau=1.0, rng=rng_mi, n=250_000) for a in amps]
+    mi_apx = [mi_small_snr_approx_bits(a=a, tau=1.0) for a in amps]
 
     plt.figure()
     plt.plot(amps, mi_est, marker="o", label="Estimated MI(s;y) [bits]")
@@ -124,11 +197,37 @@ def run_mobius_experiment(
     q_hat, tau2_hat, s_hat, logZ = hmm_em_known_x(y=y, x=x)
     acc = parity_accuracy(s, s_hat)
 
+    resid_std = float(np.std(e))
+
     print("AR1 coefficient:   ", round(a_hat, 4))
-    print("Residual std:      ", round(float(np.std(e)), 4))
+    print("Residual std:      ", round(resid_std, 4))
     print("FFT leakage metric:", round(leak, 4))
     print("Recovered flip rate:", round(q_hat, 4))
     print("Parity accuracy:   ", round(acc, 4))
+
+    # Save structured results to CSV
+    csv_path = os.path.join(outdir, "summary.csv")
+    with open(csv_path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=[
+            "omega", "n", "tau", "amp",
+            "AR1_a_hat", "AR1_resid_std", "FFT_peak_over_total",
+            "HMM_q_hat", "HMM_tau_hat", "Parity_acc", "log_evidence",
+        ])
+        w.writeheader()
+        w.writerow({
+            "omega": omega,
+            "n": n,
+            "tau": tau,
+            "amp": amp,
+            "AR1_a_hat": round(a_hat, 6),
+            "AR1_resid_std": round(resid_std, 6),
+            "FFT_peak_over_total": round(leak, 6),
+            "HMM_q_hat": round(q_hat, 6),
+            "HMM_tau_hat": round(float(np.sqrt(tau2_hat)), 6),
+            "Parity_acc": round(acc, 6),
+            "log_evidence": round(logZ, 4),
+        })
+    print(f"Wrote: {csv_path}")
 
     view = min(1000, n)
 
