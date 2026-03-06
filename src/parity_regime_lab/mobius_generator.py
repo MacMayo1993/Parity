@@ -29,17 +29,29 @@ def gen_mobius_seam_signal(
 
     s = np.ones(n, dtype=int)
 
+    TWO_PI = 2 * np.pi
+
     for t in range(1, n):
         theta_prev = theta[t - 1]
         theta[t] = theta_prev + omega + rng.normal(0.0, noise_theta)
 
-        prev_mod = theta_prev % (2 * np.pi)
-        curr_mod = theta[t] % (2 * np.pi)
+        prev_mod = theta_prev % TWO_PI
+        curr_mod = theta[t] % TWO_PI
 
-        # seam crossing: phase wraps past the seam angle from below
-        crossed = (prev_mod < seam) and (curr_mod >= seam)
+        # Count how many times the trajectory crosses the seam in this step.
+        # We integrate the crossing count exactly: the number of times a
+        # linearly-interpolated path from theta_prev to theta[t] crosses
+        # (seam + 2pi*k) for integer k.  Each crossing flips orientation once.
+        #
+        # Equivalently: shift so the seam is at 0, count full half-turns
+        # traversed (i.e. crossings of 0 mod 2pi in the shifted frame).
+        lo = theta_prev - seam
+        hi = theta[t] - seam
+        if lo > hi:
+            lo, hi = hi, lo
+        n_crossings = int(np.floor(hi / TWO_PI)) - int(np.floor(lo / TWO_PI))
 
-        s[t] = s[t - 1] * (-1 if crossed else 1)
+        s[t] = s[t - 1] * ((-1) ** n_crossings)
 
     x = amp * np.sin(theta)
     y = s * x + rng.normal(0.0, tau, size=n)
